@@ -1,0 +1,13 @@
+# 仅跟踪 WPS 报卡质控宏相关文件
+*.xlsx
+*.docx
+*.tar.gz
+*.lnk
+*.exe
+*.jpg
+*.log
+*.bak
+*.bat
+desktop.ini
+*.csv
+*/

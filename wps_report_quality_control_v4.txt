@@ -1,0 +1,681 @@
+// ============================================================
+// 报卡质控宏 v4 — checkload 精简版
+// checkload 仅检查：身份证 / 迟报 / 迟审
+// 保留：qualitycontrol / repeatcontrol 完整功能
+//
+// WPS JSA 语法约束：顶层只允许 function 声明
+// ============================================================
+
+// ==================== 全局初始化（惰性加载）====================
+function init() {
+    var g = init._g;
+    if (g) return g;
+    g = {};
+    init._g = g;
+
+    g.COL = {
+        A:'A',B:'B',C:'C',D:'D',E:'E',F:'F',G:'G',H:'H',I:'I',J:'J',
+        K:'K',L:'L',M:'M',N:'N',O:'O',P:'P',Q:'Q',R:'R',S:'S',T:'T',
+        U:'U',V:'V',W:'W',X:'X',Y:'Y',Z:'Z',AA:'AA',AB:'AB',AC:'AC',
+        AD:'AD',AE:'AE',AF:'AF',AG:'AG',AH:'AH',AI:'AI',AJ:'AJ',AK:'AK',
+        AL:'AL',AM:'AM',AN:'AN',AO:'AO',AP:'AP',AQ:'AQ',AR:'AR',AS:'AS',
+        AT:'AT',AU:'AU'
+    };
+
+    var m = {};
+    m.cell = function(sheet, col, row) {
+        try { var c = sheet.Range(col + row); c.Font.Color = 255; c.Interior.Color = 65536; } catch (e) {}
+    };
+    m.comment = function(sheet, col, row, text) {
+        try {
+            var c = sheet.Range(col + row);
+            if (c.Comment) { var old = c.Comment.Text(); c.ClearComments(); c.AddComment(old + '\n' + text); }
+            else { c.AddComment(text); }
+        } catch (e) {}
+    };
+    m.flag = function(sheet, col, row, msg) { m.cell(sheet, col, row); m.comment(sheet, col, row, msg); };
+    g.MARK = m;
+
+    var b = {};
+    b._sheetName = null;
+    b.create = function(sheet) {
+        var ts = new Date().getTime();
+        var name = '_bak_' + ts;
+        if (name.length > 31) name = '_bak_' + String(ts).substring(0, 24);
+        try {
+            sheet.Copy(null, Sheets.Item(Sheets.Count));
+            var ns = Sheets.Item(Sheets.Count); ns.Name = name; b._sheetName = name; return true;
+        } catch (e) { alert('[备份失败] ' + e.message); return false; }
+    };
+    b.getBackupName = function() { return b._sheetName; };
+    g.BACKUP = b;
+
+    var e = {};
+    e.save = function() { e._s = Application.ScreenUpdating; e._c = Application.Calculation; e._e = Application.EnableEvents; };
+    e.optimize = function() { e.save(); Application.ScreenUpdating = false; Application.Calculation = xlCalculationManual; Application.EnableEvents = false; };
+    e.restore = function() { Application.ScreenUpdating = e._s; Application.Calculation = e._c; Application.EnableEvents = e._e; };
+    e.safeRun = function(fn) {
+        e.optimize();
+        try { fn(); } catch (ex) { alert('出错：' + ex.message); } finally { e.restore(); }
+    };
+    g.EXCEL = e;
+
+    return g;
+}
+
+// ==================== 通用工具 ====================
+function getSheet() { return Sheets.Item(1); }
+function getLastRow(sheet) { return sheet.Range('A' + sheet.Rows.Count).End(xlUp).Row; }
+function isDigit(char) { return /^[0-9]$/.test(char); }
+
+// ==================== 重卡辅助函数 ====================
+function processTimeCompare(sheet, rowsArray) {
+    if (rowsArray.length < 2) return;
+    var mt = sheet.Range('S' + rowsArray[0]).Value2, kr = rowsArray[0];
+    for (var i = 1; i < rowsArray.length; i++) {
+        var mx = sheet.Range('S' + rowsArray[i]).Value2, dr = rowsArray[i];
+        if (mt > mx) { var t = mt; mt = mx; mx = t; var tr = kr; kr = rowsArray[i]; dr = tr; }
+        if (mx - mt <= 15) { keeprow(sheet, kr); deleterow(sheet, dr); }
+    }
+}
+function unique(vr, sheet, col) { var r = []; for (var i = 0; i < vr.length; i++) { var v = sheet.Range(col + vr[i]).Value2; if (r.indexOf(v) === -1) r.push(v); } return r; }
+function findrow(m, t) { var r = []; m.forEach(function(v, k) { if (v === t) r.push(k); }); return r; }
+function findmorethan2(m) { var r = []; m.forEach(function(v, k) { if (v >= 2) r.push(k); }); return r; }
+function deleterow(s, rn) { var row = s.Rows.Item(rn); row.Interior.Pattern = xlPatternSolid; row.Interior.Color = 255; }
+function keeprow(s, rn) { var row = s.Rows.Item(rn); row.Interior.Pattern = xlPatternSolid; row.Interior.Color = 65535; row.Interior.PatternColorIndex = -4105; }
+
+// ============================================================
+// checkload — 精简版：身份证 / 迟报 / 迟审（含订正卡）
+// ============================================================
+function checkload() {
+    var g = init();
+    var EXCEL = g.EXCEL;
+
+    // 在优化之前获取当前时间（此时 Calculation 还是自动模式）
+    var nowTime;
+    try {
+        var tmpSheet = getSheet();
+        var tmpCell = tmpSheet.Range('XFD1');
+        tmpCell.Formula = '=NOW()';
+        nowTime = tmpCell.Value2;
+        tmpCell.Clear();
+    } catch (e) {
+        // 兜底：JS Date 计算（可能有时区偏差）
+        var d = new Date(), e2 = new Date(1899, 11, 30);
+        nowTime = (d.getTime() - e2.getTime()) / 86400000;
+    }
+
+    EXCEL.safeRun(function() {
+        var sheet = getSheet();
+        var lastRow = getLastRow(sheet);
+
+        // 预编译正则
+        var reDisaster = /鼠疫|霍乱|传染性非典|肺炭疽/g;
+
+        // 当前时间（已在外面用 =NOW() 获取）
+
+        // 清理数据范围
+        sheet.Range('A1:AT' + lastRow).ClearFormats();
+        sheet.Range('A1:AT' + lastRow).ClearComments();
+
+        // 保存原始 AG 值（订正卡兜底需要原始县区审核时间）
+        var agOrig = [];
+        var agVals = sheet.Range('AG2:AG' + lastRow).Value2;
+        if (agVals != null) {
+            if (typeof agVals === 'object' && agVals.length !== undefined) {
+                if (agVals.length > 0 && typeof agVals[0] === 'object' && agVals[0] !== null && agVals[0].length !== undefined) {
+                    for (var agi = 2; agi <= lastRow; agi++) agOrig[agi] = agVals[agi - 2][0];
+                } else {
+                    for (var agi = 2; agi <= lastRow; agi++) agOrig[agi] = agVals[agi - 2];
+                }
+            }
+        }
+
+        // AG 空值覆盖为 nowTime，有数据的不动
+        for (var agi = 2; agi <= lastRow; agi++) {
+            var agv = agOrig[agi];
+            if (agv == null || agv === '' || String(agv) === '.') {
+                sheet.Range('AG' + agi).Value2 = nowTime;
+            }
+        }
+
+        // 统计变量
+        var certnum = 0, checkloadtime = 0, loadadjusttime = 0;
+
+        for (var i = 2; i <= lastRow; i++) {
+            var seq = 0;
+            var issues = [];
+
+            // ---- 身份证校验 ----
+            var region = sheet.Range('L' + i).Value2;
+            var cert = sheet.Range('F' + i).Value2;
+            if ((region === '本县区' || region === '本市其它县区' || region === '其他省') && cert != null && cert !== '') {
+                var certStr = String(cert);
+                if (certStr.length !== 20 && certStr.substring(0, 1) !== "'") {
+                    if (certStr.substring(0, 1) !== '*') {
+                        certStr = '*' + certStr;
+                        sheet.Range('F' + i).Value2 = certStr;
+                    }
+                }
+                var badCert = false;
+                if (certStr.length !== 20) {
+                    badCert = true;
+                } else {
+                    var sub19 = certStr.substring(18, 19);
+                    if (!isDigit(sub19)) {
+                        if (sub19 === 'X' || sub19 === 'x') { if (isNaN(certStr.substring(1, 18))) badCert = true; }
+                        else { badCert = true; }
+                    } else { if (isNaN(certStr.substring(1, 19))) badCert = true; }
+                }
+                if (badCert) {
+                    sheet.Range('F' + i).Font.Color = 255;
+                    sheet.Range('F' + i).Interior.Color = 65536;
+                    sheet.Range('F' + i).AddComment('身份证不正确');
+                    certnum++; seq++;
+                    issues.push('【' + seq + '】身份证不正确');
+                }
+            }
+
+            // ---- 迟报 / 迟审 ----
+            var dis = sheet.Range('U' + i).Value2;
+            // 病种含肺结核/HIV/艾滋病（U或V列）则不纳入迟报迟审，整行红标提示
+            var skipDisease = false;
+            if (dis != null) {
+                var disV = sheet.Range('V' + i).Value2;
+                var disStrU = String(dis);
+                var disStrV = (disV != null) ? String(disV) : '';
+                skipDisease = (disStrU.indexOf('肺结核') !== -1 || disStrU.indexOf('HIV') !== -1 || disStrU.indexOf('艾滋病') !== -1 ||
+                              disStrV.indexOf('肺结核') !== -1 || disStrV.indexOf('HIV') !== -1 || disStrV.indexOf('艾滋病') !== -1);
+            }
+            if (dis != null && !skipDisease) {
+                var disStr = String(dis);
+                var matches_dis = reDisaster.test(disStr);
+                reDisaster.lastIndex = 0;
+
+                var load_time = sheet.Range('AD' + i).Value2;  // 报告卡录入时间
+                var diag_time = sheet.Range('S' + i).Value2;   // 诊断时间
+                var w_time = sheet.Range('W' + i).Value2;      // 订正前诊断时间
+                var x_time = sheet.Range('X' + i).Value2;      // 订正前终审时间
+                var ak_time = sheet.Range('AK' + i).Value2;    // 订正报告时间
+                var al_time = sheet.Range('AL' + i).Value2;    // 订正终审时间
+                var ag_time = agOrig[i];                     // 县区审核时间（原始值）
+
+                // 判断是否为订正卡：AK（订正报告时间）有数据则认为订正卡
+                var isFixed = (ak_time != null && ak_time !== '' && String(ak_time) !== '.');
+
+                if (!isFixed) {
+                    // ========== 原始卡 ==========
+                    // 迟报：AD(录入) - S(诊断)
+                    if (load_time != null && diag_time != null) {
+                        var d1 = load_time - diag_time;
+                        if (d1 > 2 / 24 && matches_dis) {
+                            sheet.Range('S' + i).Font.Color = 255; sheet.Range('S' + i).Interior.Color = 65536;
+                            sheet.Range('S' + i).AddComment('甲类报告超2小时');
+                            checkloadtime++; seq++; issues.push('【' + seq + '】迟报\u00b7甲类报告超2小时');
+                        } else if (d1 > 1 && !matches_dis) {
+                            sheet.Range('S' + i).Font.Color = 255; sheet.Range('S' + i).Interior.Color = 65536;
+                            sheet.Range('S' + i).AddComment('乙类报告超24小时');
+                            checkloadtime++; seq++; issues.push('【' + seq + '】迟报\u00b7乙类报告超24小时');
+                        }
+                    }
+                    // 迟审：AG(县区审核) / nowTime - AD(录入)
+                    if (load_time != null) {
+                        var auditTime = (ag_time != null && String(ag_time) !== '.') ? ag_time : nowTime;
+                        var d2 = auditTime - load_time;
+                        if (d2 > 2 / 24 && matches_dis) {
+                            sheet.Range('AD' + i).Font.Color = 255; sheet.Range('AD' + i).Interior.Color = 65536;
+                            sheet.Range('AD' + i).AddComment('甲类审核超2小时');
+                            loadadjusttime++; seq++; issues.push('【' + seq + '】迟审\u00b7甲类审核超2小时');
+                        }
+                        if (d2 > 1 && !matches_dis) {
+                            sheet.Range('AD' + i).Font.Color = 255; sheet.Range('AD' + i).Interior.Color = 65536;
+                            sheet.Range('AD' + i).AddComment('乙类审核超24小时');
+                            loadadjusttime++; seq++; issues.push('【' + seq + '】迟审\u00b7乙类审核超24小时');
+                        }
+                    }
+
+                } else {
+                    // ========== 订正卡 ==========
+                    // 条件：X(订正前终审)有数据 且 X != AL(订正终审)
+                    var xRaw = (x_time != null && String(x_time) !== '.') ? String(x_time) : '';
+                    var alRaw = (al_time != null && String(al_time) !== '.') ? String(al_time) : '';
+                    if (xRaw !== '' && xRaw !== alRaw) {
+                        var wVal = (w_time != null && String(w_time) !== '.') ? w_time : null;
+                        var xVal = (x_time != null && String(x_time) !== '.') ? x_time : null;
+                        var akVal = (ak_time != null && String(ak_time) !== '.') ? ak_time : null;
+
+                        // 订正前迟报：AD - W
+                        if (load_time != null && wVal != null) {
+                            var d1 = load_time - wVal;
+                            if (d1 > 2 / 24 && matches_dis) {
+                                sheet.Range('AD' + i).Font.Color = 255; sheet.Range('AD' + i).Interior.Color = 65536;
+                                sheet.Range('AD' + i).AddComment('订正前迟报\u00b7甲类超2小时');
+                                checkloadtime++; seq++; issues.push('【' + seq + '】订正前迟报\u00b7甲类超2小时');
+                            } else if (d1 > 1 && !matches_dis) {
+                                sheet.Range('AD' + i).Font.Color = 255; sheet.Range('AD' + i).Interior.Color = 65536;
+                                sheet.Range('AD' + i).AddComment('订正前迟报\u00b7乙类超24小时');
+                                checkloadtime++; seq++; issues.push('【' + seq + '】订正前迟报\u00b7乙类超24小时');
+                            }
+                        }
+                        // 订正前迟审：X - AD
+                        if (xVal != null && load_time != null) {
+                            var d2 = xVal - load_time;
+                            if (d2 > 2 / 24 && matches_dis) {
+                                sheet.Range('X' + i).Font.Color = 255; sheet.Range('X' + i).Interior.Color = 65536;
+                                sheet.Range('X' + i).AddComment('订正前迟审\u00b7甲类超2小时');
+                                loadadjusttime++; seq++; issues.push('【' + seq + '】订正前迟审\u00b7甲类超2小时');
+                            } else if (d2 > 1 && !matches_dis) {
+                                sheet.Range('X' + i).Font.Color = 255; sheet.Range('X' + i).Interior.Color = 65536;
+                                sheet.Range('X' + i).AddComment('订正前迟审\u00b7乙类超24小时');
+                                loadadjusttime++; seq++; issues.push('【' + seq + '】订正前迟审\u00b7乙类超24小时');
+                            }
+                        }
+                        // 订正后迟报：AK - S
+                        if (akVal != null && diag_time != null) {
+                            var d3 = akVal - diag_time;
+                            if (d3 > 2 / 24 && matches_dis) {
+                                sheet.Range('AK' + i).Font.Color = 255; sheet.Range('AK' + i).Interior.Color = 65536;
+                                sheet.Range('AK' + i).AddComment('订正后迟报\u00b7甲类超2小时');
+                                checkloadtime++; seq++; issues.push('【' + seq + '】订正后迟报\u00b7甲类超2小时');
+                            } else if (d3 > 1 && !matches_dis) {
+                                sheet.Range('AK' + i).Font.Color = 255; sheet.Range('AK' + i).Interior.Color = 65536;
+                                sheet.Range('AK' + i).AddComment('订正后迟报\u00b7乙类超24小时');
+                                checkloadtime++; seq++; issues.push('【' + seq + '】订正后迟报\u00b7乙类超24小时');
+                            }
+                        }
+                        // 订正后迟审：AG - AK
+                        if (ag_time != null && akVal != null) {
+                            var d4 = ag_time - akVal;
+                            if (d4 > 2 / 24 && matches_dis) {
+                                sheet.Range('AG' + i).Font.Color = 255; sheet.Range('AG' + i).Interior.Color = 65536;
+                                sheet.Range('AG' + i).AddComment('订正后迟审\u00b7甲类超2小时');
+                                loadadjusttime++; seq++; issues.push('【' + seq + '】订正后迟审\u00b7甲类超2小时');
+                            } else if (d4 > 1 && !matches_dis) {
+                                sheet.Range('AG' + i).Font.Color = 255; sheet.Range('AG' + i).Interior.Color = 65536;
+                                sheet.Range('AG' + i).AddComment('订正后迟审\u00b7乙类超24小时');
+                                loadadjusttime++; seq++; issues.push('【' + seq + '】订正后迟审\u00b7乙类超24小时');
+                            }
+                        }
+                    }
+                }
+            }
+            // 肺结核/HIV/艾滋病病种：整行红底标注
+            if (skipDisease) {
+                var rowRange = sheet.Range('A' + i + ':AT' + i);
+                rowRange.Interior.Color = 255;  // 红底
+            }
+
+            // ---- A 列写汇总 ----
+            var aCell = sheet.Range('A' + i);
+            if (aCell.Comment) aCell.Comment.Delete();
+            if (issues.length > 0) {
+                aCell.AddComment(issues.join('\n'));
+            }
+        }
+
+        // 格式化日期
+        sheet.Range('H:H,R:R,Z:Z,T:T').NumberFormatLocal = "yyyy/m/d;@";
+        sheet.Range('S:S,AD:AD,W:X,AK:AL,AG2:AG' + lastRow).NumberFormatLocal = "yyyy/m/d h:mm;@";
+
+        alert('分析完毕！\n' +
+              '身份证有问题：【' + certnum + '】个。\n' +
+              '迟报卡（含订正）：【' + checkloadtime + '】个。\n' +
+              '迟审卡（含订正）：【' + loadadjusttime + '】个。');
+    });
+}
+
+// ============================================================
+// qualitycontrol — 完整报卡质控（不变）
+// ============================================================
+function qualitycontrol() {
+    var g = init();
+    var EXCEL = g.EXCEL;
+
+    EXCEL.safeRun(function() {
+        var sheet = getSheet();
+
+        var lastRow = getLastRow(sheet);
+        var ctx = {
+            certnum: 0, checkloadtime: 0, loadadjusttime: 0,
+            aggnum1: 0, occpynum1: 0, occpynum2: 0,
+            occpynum3: 0, occpynum4: 0,
+            notenum: 0, yigannum: 0, addressnum: 0
+        };
+
+        // 预编译正则
+        var reClass = /(\d+|[一二三四五六七八九十大中小]+)(班)?(年级)?(年)?(\d+|[一二三四五六七八九十]+|\(\d+\)|\([一二三四五六七八九十]+\))(班)?/;
+        var reDisaster = /鼠疫|霍乱|传染性非典|肺炭疽/g;
+        var rePositive = /阳性|\+/;
+        var reKindergarten = /幼儿园/;
+        var reMalaria = /疟/g;
+        var reLocalInput = /本地|输入/;
+        var occpNeedUnit = ['民工', '教师', '医务人员', '工人', '干部职员'];
+        var disNeedConfirmed = ['新型冠状病毒感染', '登革热'];
+
+        // 清理数据范围
+        sheet.Range('A1:AT' + lastRow).ClearFormats();
+        sheet.Range('A1:AT' + lastRow).ClearComments();
+
+        // 表头
+        sheet.Range('A1').Value2 = '问题汇总';
+        sheet.Range('A1').Font.Bold = true;
+
+        for (var i = 2; i <= lastRow; i++) {
+            var rowquesall = 0;
+            var rowquestion = '';
+
+            // ---- 身份证 ----
+            var region = sheet.Range('L' + i).Value2;
+            var cert = sheet.Range('F' + i).Value2;
+            if ((region === '本县区' || region === '本市其它县区' || region === '其他省') && cert != null && cert !== '') {
+                var certStr = String(cert);
+                if (certStr.length !== 20 && certStr.substring(0, 1) !== "'") {
+                    if (certStr.substring(0, 1) !== '*') {
+                        certStr = '*' + certStr;
+                        sheet.Range('F' + i).Value2 = certStr;
+                    }
+                }
+                if (certStr.length !== 20) {
+                    sheet.Range('F' + i).Font.Color = 255; sheet.Range('F' + i).Interior.Color = 65536;
+                    sheet.Range('F' + i).AddComment('非18位身份证');
+                    ctx.certnum++; rowquesall++; rowquestion += rowquesall + '. 身份证不正确\n';
+                } else {
+                    var sub19 = certStr.substring(18, 19);
+                    if (!isDigit(sub19)) {
+                        if (sub19 === 'X' || sub19 === 'x') { if (isNaN(certStr.substring(1, 18))) {
+                            sheet.Range('F' + i).Font.Color = 255; sheet.Range('F' + i).Interior.Color = 65536;
+                            sheet.Range('F' + i).AddComment('身份证非17位数字+X');
+                            ctx.certnum++; rowquesall++; rowquestion += rowquesall + '. 身份证不正确\n';
+                        }} else {
+                            sheet.Range('F' + i).Font.Color = 255; sheet.Range('F' + i).Interior.Color = 65536;
+                            sheet.Range('F' + i).AddComment('身份证最后一位非X');
+                            ctx.certnum++; rowquesall++; rowquestion += rowquesall + '. 身份证不正确\n';
+                        }
+                    } else { if (isNaN(certStr.substring(1, 19))) {
+                        sheet.Range('F' + i).Font.Color = 255; sheet.Range('F' + i).Interior.Color = 65536;
+                        sheet.Range('F' + i).AddComment('身份证非18位数字');
+                        ctx.certnum++; rowquesall++; rowquestion += rowquesall + '. 身份证不正确\n';
+                    }}
+                }
+            }
+
+            // ---- 地址（仅光明区需包含街道信息）----
+            var address = String(sheet.Range('N' + i).Value2 || '');
+            if (address.indexOf('光明区') !== -1 && address.indexOf('街道') === -1) {
+                sheet.Range('N' + i).Font.Color = 255; sheet.Range('N' + i).Interior.Color = 65536;
+                sheet.Range('N' + i).AddComment('光明区现住址必须包含街道信息');
+                ctx.addressnum++; rowquesall++; rowquestion += rowquesall + '. 现住址必须包含街道信息\n';
+            }
+
+            // ---- 年龄与人群 ----
+            var age = String(sheet.Range('I' + i).Value2 || '');
+            var guardian = String(sheet.Range('E' + i).Text || '');
+            var name = String(sheet.Range('D' + i).Text || '');
+            var occp = sheet.Range('O' + i).Value2;
+            var compy = String(sheet.Range('J' + i).Text || '').replace(/\（/g, '(').replace(/\）/g, ')');
+            var ageNum = (age.indexOf('岁') !== -1) ? Number(age.replace('岁', '')) : 0;
+            var isChild = (age.indexOf('月') !== -1 || age.indexOf('天') !== -1);
+
+            if (isChild || ageNum <= 14) {
+                if (guardian === '') {
+                    sheet.Range('E' + i).Font.Color = 255; sheet.Range('E' + i).Interior.Color = 65536;
+                    sheet.Range('E' + i).AddComment('14岁以下患者需要填写监护人信息');
+                    sheet.Range('I' + i).Font.Color = 255; sheet.Range('I' + i).Interior.Color = 65536;
+                    ctx.aggnum1++; rowquesall++; rowquestion += rowquesall + '. 人群年龄与其职业有问题\n';
+                }
+                if (guardian !== '' && guardian === name) {
+                    sheet.Range('E' + i).Font.Color = 255; sheet.Range('E' + i).Interior.Color = 65536;
+                    sheet.Range('E' + i).AddComment('14岁以下患者与监护人名字一致');
+                    sheet.Range('I' + i).Font.Color = 255; sheet.Range('I' + i).Interior.Color = 65536;
+                    ctx.aggnum1++; rowquesall++; rowquestion += rowquesall + '. 人群年龄与其职业有问题\n';
+                }
+            }
+            if (occp === '学生' || occp === '幼托儿童') {
+                if (compy === '' || !reClass.test(compy)) {
+                    sheet.Range('J' + i).Font.Color = 255; sheet.Range('J' + i).Interior.Color = 65536;
+                    sheet.Range('J' + i).AddComment('要求填写单位为数字班级');
+                    ctx.occpynum1++; rowquesall++; rowquestion += rowquesall + '. 学生要求填写单位为数字班级\n';
+                }
+            }
+            if (occpNeedUnit.indexOf(occp) !== -1 && !compy) {
+                sheet.Range('J' + i).Font.Color = 255; sheet.Range('J' + i).Interior.Color = 65536;
+                sheet.Range('J' + i).AddComment(occp + '须填写发病时所在的工作单位名称');
+                ctx.occpynum2++; rowquesall++; rowquestion += rowquesall + '.' + occp + '必须填写发病时所在的工作单位名称\n';
+            }
+            if (age.indexOf('岁') !== -1) {
+                if (ageNum > 3 && ageNum < 5 && (occp === '散居儿童' || occp === '学生')) {
+                    sheet.Range('O' + i).Font.Color = 255; sheet.Range('O' + i).Interior.Color = 65536;
+                    sheet.Range('O' + i).AddComment('3-5岁不对应幼托儿童为可疑');
+                    sheet.Range('I' + i).Font.Color = 255; sheet.Range('I' + i).Interior.Color = 65536;
+                    ctx.occpynum3++; rowquesall++; rowquestion += rowquesall + '. 3-5岁不对应幼托儿童为可疑\n';
+                } else if (ageNum > 7 && ageNum < 16 && (occp === '散居儿童' || occp === '幼托儿童')) {
+                    sheet.Range('O' + i).Font.Color = 255; sheet.Range('O' + i).Interior.Color = 65536;
+                    sheet.Range('O' + i).AddComment('7-18岁不对应学生为可疑');
+                    sheet.Range('I' + i).Font.Color = 255; sheet.Range('I' + i).Interior.Color = 65536;
+                    ctx.occpynum3++; rowquesall++; rowquestion += rowquesall + '. 7-18岁不对应学生为可疑\n';
+                } else if (ageNum < 16 && ['学生','幼托儿童','散居儿童'].indexOf(occp) === -1) {
+                    sheet.Range('O' + i).Font.Color = 255; sheet.Range('O' + i).Interior.Color = 65536;
+                    sheet.Range('O' + i).AddComment('16岁以下从业人员不符合实际');
+                    sheet.Range('I' + i).Font.Color = 255; sheet.Range('I' + i).Interior.Color = 65536;
+                    ctx.occpynum3++; rowquesall++; rowquestion += rowquesall + '. 16岁以下从业人员不符合实际\n';
+                }
+            } else if (age.indexOf('月') !== -1 || age.indexOf('日') !== -1 || (age.indexOf('岁') !== -1 && ageNum <= 3)) {
+                if (occp !== '幼托儿童' && occp !== '散居儿童') {
+                    sheet.Range('O' + i).Font.Color = 255; sheet.Range('O' + i).Interior.Color = 65536;
+                    sheet.Range('O' + i).AddComment('3岁以下应为幼托儿童或散居儿童');
+                    sheet.Range('I' + i).Font.Color = 255; sheet.Range('I' + i).Interior.Color = 65536;
+                    ctx.occpynum3++; rowquesall++; rowquestion += rowquesall + '. 3岁以下应为幼托儿童或散居儿童\n';
+                }
+            }
+            if (reKindergarten.test(compy) && occp !== '幼托儿童' && (isChild || ageNum < 16)) {
+                sheet.Range('O' + i).Font.Color = 255; sheet.Range('O' + i).Interior.Color = 65536;
+                sheet.Range('O' + i).AddComment('工作单位为幼儿园但人群分类未对应幼托儿童');
+                ctx.occpynum4++; rowquesall++; rowquestion += rowquesall + '. 工作单位为幼儿园但人群分类未对应幼托儿童\n';
+            }
+
+            // ---- 迟报迟审 ----
+            var disU = sheet.Range('U' + i).Value2;
+            if (disU != null) {
+                var disStr2 = String(disU);
+                var matches_dis2 = reDisaster.test(disStr2);
+                reDisaster.lastIndex = 0;
+                var load_time = sheet.Range('AD' + i).Value2;
+                var diag_time = sheet.Range('S' + i).Value2;
+
+                if (load_time != null && diag_time != null) {
+                    var d1 = load_time - diag_time;
+                    if (d1 > 2/24 && matches_dis2) {
+                        sheet.Range('S' + i).Font.Color = 255; sheet.Range('S' + i).Interior.Color = 65536;
+                        sheet.Range('S' + i).AddComment('甲类报告超2小时');
+                        ctx.checkloadtime++; rowquesall++; rowquestion += '\n' + rowquesall + '. 甲类报告超2小时';
+                    } else if (d1 > 1 && !matches_dis2) {
+                        sheet.Range('S' + i).Font.Color = 255; sheet.Range('S' + i).Interior.Color = 65536;
+                        sheet.Range('S' + i).AddComment('乙类报告超24小时');
+                        ctx.checkloadtime++; rowquesall++; rowquestion += '\n' + rowquesall + '. 乙类报告超24小时';
+                    }
+                }
+
+                // 迟审：有 AG 用 AG（实际审核），无 AG 用 nowTime（尚未审核）
+                var agVal = sheet.Range('AG' + i).Value2;
+                var auditTime = (agVal != null && String(agVal) !== '.') ? agVal : null;
+                var modified_time = sheet.Range('AK' + i).Value2;
+                if (auditTime != null && load_time != null) {
+                    var d2 = Number(auditTime) - Number(load_time);
+                    var d2b = modified_time != null ? Number(auditTime) - Number(modified_time) : 999;
+                    var isDot = modified_time != null && String(modified_time) === '.';
+                    if (d2 > 2/24 && matches_dis2 && (d2b > 2/24 || isDot)) {
+                        sheet.Range('AD' + i).Font.Color = 255; sheet.Range('AD' + i).Interior.Color = 65536;
+                        sheet.Range('AD' + i).AddComment('甲类审核超2小时');
+                        ctx.loadadjusttime++; rowquesall++; rowquestion += '\n' + rowquesall + '. 甲类审核超2小时';
+                    }
+                    if (d2 > 1 && !matches_dis2 && (d2b > 1 || isDot)) {
+                        sheet.Range('AD' + i).Font.Color = 255; sheet.Range('AD' + i).Interior.Color = 65536;
+                        sheet.Range('AD' + i).AddComment('乙类审核超24小时');
+                        ctx.loadadjusttime++; rowquesall++; rowquestion += '\n' + rowquesall + '. 乙类审核超24小时';
+                    }
+                }
+
+                // ---- 疾病逻辑 ----
+                var chctype = sheet.Range('P' + i).Value2;
+                var chcnote = String(sheet.Range('AT' + i).Value2 || '');
+                var yigan_crt2 = sheet.Range('Q' + i).Value2;
+
+                if (chctype === '确诊病例' && !rePositive.test(chcnote)) {
+                    sheet.Range('AT' + i).Font.Color = 255; sheet.Range('AT' + i).Interior.Color = 65536;
+                    sheet.Range('AT' + i).AddComment('确诊病例要求有病原学结果');
+                    ctx.notenum++; rowquesall++; rowquestion += '\n' + rowquesall + '. 确诊病例要求有病原学结果';
+                }
+                if (disStr2 === '乙肝' && (chctype !== '确诊病例' || yigan_crt2 !== '慢性')) {
+                    sheet.Range('U' + i).Font.Color = 255; sheet.Range('U' + i).Interior.Color = 65536;
+                    sheet.Range('U' + i).AddComment('乙肝必须是确诊病例，慢性');
+                    ctx.yigannum++; rowquesall++; rowquestion += '\n' + rowquesall + '. 乙肝必须是确诊病例，慢性';
+                }
+                if (disStr2 === '丙肝') {
+                    if (chctype === '确诊病例' && yigan_crt2 !== '慢性' && yigan_crt2 !== '急性') {
+                        sheet.Range('U' + i).Font.Color = 255; sheet.Range('U' + i).Interior.Color = 65536;
+                        sheet.Range('U' + i).AddComment('丙肝确诊病例必须是慢性或者急性');
+                        ctx.yigannum++; rowquesall++; rowquestion += '\n' + rowquesall + '. 丙肝确诊病例必须是慢性或者急性';
+                    } else if (chctype === '临床诊断病例' && yigan_crt2 !== '未分型') {
+                        sheet.Range('U' + i).Font.Color = 255; sheet.Range('U' + i).Interior.Color = 65536;
+                        sheet.Range('U' + i).AddComment('丙肝临床诊断病例必须是未分型');
+                        ctx.yigannum++; rowquesall++; rowquestion += '\n' + rowquesall + '. 丙肝临床诊断病例必须是未分型';
+                    }
+                }
+                if (disNeedConfirmed.indexOf(disStr2) !== -1 && chctype !== '确诊病例') {
+                    sheet.Range('U' + i).Font.Color = 255; sheet.Range('U' + i).Interior.Color = 65536;
+                    sheet.Range('U' + i).AddComment(disStr2 + '必须要求病例分类为"确诊病例"');
+                    ctx.yigannum++; rowquesall++; rowquestion += '\n' + rowquesall + '. ' + disStr2 + '须分类为"确诊病例"';
+                }
+                reMalaria.lastIndex = 0;
+                if (reMalaria.test(disStr2) && (chctype !== '确诊病例' || yigan_crt2 !== '未分型')) {
+                    sheet.Range('U' + i).Font.Color = 255; sheet.Range('U' + i).Interior.Color = 65536;
+                    sheet.Range('U' + i).AddComment('疟疾分为间日疟、恶性疟和未分型三类');
+                    ctx.yigannum++; rowquesall++; rowquestion += '\n' + rowquesall + '. 疟疾分型错误';
+                }
+                if ((disStr2 === '间日疟' || disStr2 === '恶性疟' || disStr2 === '登革热') && !reLocalInput.test(chcnote)) {
+                    sheet.Range('U' + i).Font.Color = 255; sheet.Range('U' + i).Interior.Color = 65536;
+                    sheet.Range('U' + i).AddComment('需要注明本地感染还是输入（外市输入、境外输入）');
+                    ctx.notenum++; rowquesall++; rowquestion += '\n' + rowquesall + '. 需要注明本地感染还是输入';
+                }
+                if (disStr2 === '炭疽' && yigan_crt2 !== '肺炭疽' && yigan_crt2 !== '皮肤炭疽' && yigan_crt2 !== '未分型') {
+                    sheet.Range('U' + i).Font.Color = 255; sheet.Range('U' + i).Interior.Color = 65536;
+                    sheet.Range('U' + i).AddComment('炭疽分为肺炭疽、皮肤炭疽和未分型三类');
+                    ctx.yigannum++; rowquesall++; rowquestion += '\n' + rowquesall + '. 炭疽分型错误';
+                }
+            }
+
+            // ---- 死亡 ----
+            var deathdate = sheet.Range('T' + i).Value2;
+            if (deathdate != null && deathdate !== '.' && deathdate !== '') {
+                sheet.Range('T' + i).Font.Color = 255; sheet.Range('T' + i).Interior.Color = 65536;
+                sheet.Range('T' + i).AddComment('死亡人群要进一步确认');
+                ctx.yigannum++; rowquesall++; rowquestion += '\n' + rowquesall + '. 死亡人群要进一步确认';
+            }
+
+            // ---- A 列汇总 ----
+            var aCell = sheet.Range('A' + i);
+            if (aCell.Comment) aCell.Comment.Delete();
+            if (rowquestion) {
+                rowquestion = rowquestion.replace(/^\n+|\n+$/g, '');
+                aCell.Value2 = rowquestion;
+                aCell.AddComment(rowquestion);
+            } else {
+                aCell.Value2 = '无问题';
+            }
+        }
+
+        // 格式化
+        sheet.Range('H:H,I:I,R:R,Z:Z,T:T,AA:AA,U:U').NumberFormatLocal = "yyyy/m/d;@";
+        sheet.Range('S:S,AD:AD,W:X,AK:AL,AE:AE,AG2:AG' + lastRow + ',AH2:AH' + lastRow).NumberFormatLocal = "yyyy/m/d h:mm;@";
+
+        alert('检测完毕！问题已汇总在A列。\n\n' +
+              '身份证有问题：【' + ctx.certnum + '】个。\n' +
+              '迟报卡：【' + ctx.checkloadtime + '】个。\n' +
+              '迟审卡：【' + ctx.loadadjusttime + '】个。\n' +
+              '患儿家长有问题：【' + ctx.aggnum1 + '】个。\n' +
+              '填写数字班级有问题：【' + ctx.occpynum1 + '】个。\n' +
+              '须工作单位职业有问题：【' + ctx.occpynum2 + '】个。\n' +
+              '年龄不对应：【' + ctx.occpynum3 + '】个。\n' +
+              '单位与年龄不对应：【' + ctx.occpynum4 + '】个。\n' +
+              '病例类型有问题：【' + ctx.yigannum + '】个。\n' +
+              '备注有问题：【' + ctx.notenum + '】个。\n' +
+              '现住址有问题：【' + ctx.addressnum + '】个。');
+    });
+}
+
+// ============================================================
+// repeatcontrol — 重卡审核（不变）
+// ============================================================
+function repeatcontrol() {
+    var g = init();
+    var BACKUP = g.BACKUP, EXCEL = g.EXCEL;
+
+    EXCEL.safeRun(function() {
+        var sheet = Application.ActiveSheet;
+        if (!BACKUP.create(sheet)) return;
+        var lastRow = sheet.Cells(sheet.Rows.Count, 1).End(xlUp).Row;
+        sheet.Range('A:AT').ClearFormats();
+
+        var dict = new Map(), dictrow = new Map();
+        for (var ri = 1; ri <= lastRow; ri++) {
+            var v = sheet.Cells(ri, 6).Value2;
+            if (v) { dict.set(v, (dict.get(v) || 0) + 1); dictrow.set(ri, v); }
+        }
+        var fm = findmorethan2(dict);
+        var ds = new Map(), dsr = [];
+        dictrow.forEach(function(v, k) { if (fm.indexOf(v) !== -1) { ds.set(k, v); if (dsr.indexOf(v) === -1) dsr.push(v); } });
+
+        for (var ig = 0; ig < dsr.length; ig++) {
+            var dsk = findrow(ds, dsr[ig]);
+            var vg = unique(dsk, sheet, 'U');
+            if (vg.length < dsk.length) {
+                var dd = new Map(), ddr = new Map();
+                for (var di = 0; di < dsk.length; di++) {
+                    var dv = sheet.Range('U' + dsk[di]).Value2;
+                    dd.set(dv, (dd.get(dv) || 0) + 1); ddr.set(dsk[di], dv);
+                }
+                var fdd = findmorethan2(dd);
+                for (var fi = 0; fi < fdd.length; fi++) {
+                    var cr = findrow(ddr, fdd[fi]);
+                    var crP = unique(cr, sheet, 'P');
+                    if (crP.length > 1) {
+                        for (var qj = 0; qj < cr.length; qj++) {
+                            var qv = sheet.Range('P' + dsk[qj]).Value2;
+                            dd.set(qv, (dd.get(qv) || 0) + 1); ddr.set(dsk[qj], qv);
+                        }
+                        ddr.forEach(function(v, k) { if (v === '临床诊断病例') deleterow(sheet, k); });
+                        if (dd.get('确诊病例') > 1) processTimeCompare(sheet, findrow(ddr, '确诊病例'));
+                        else if (dd.get('确诊病例') == 1) ddr.forEach(function(v, k) { if (v === '确诊病例') keeprow(sheet, k); });
+                    } else processTimeCompare(sheet, cr);
+                }
+            }
+        }
+
+        sheet.Range('H:H,R:R,Z:Z,T:T').NumberFormatLocal = 'yyyy/m/d;@';
+        sheet.Range('S:S,AD:AD,W:X,AK:AL,AG2:AG' + lastRow).NumberFormatLocal = 'yyyy/m/d h:mm;@';
+        alert('重卡检测完毕！');
+    });
+}
+
+function other1() { alert('暂未开发，敬请期待！'); }
+
+// ============================================================
+// 功能区初始化
+// ============================================================
+function Workbook_Open() {
+    var arr = [
+        { btn1: ['日常报表审核', 'checkload'] },
+        { btn1: ['重卡审核', 'repeatcontrol'] },
+        { btn1: ['报卡质控', 'qualitycontrol'] },
+        { btn1: ['预留项目', 'other1'] }
+    ];
+    arr.forEach(function(obj) {
+        var bar = Application.CommandBars.Add();
+        bar.Visible = true;
+        for (var i in obj) {
+            var btn = bar.Controls.Add(msoControlButton);
+            btn.Caption = obj[i][0];
+            btn.OnAction = obj[i][1];
+        }
+    });
+}
