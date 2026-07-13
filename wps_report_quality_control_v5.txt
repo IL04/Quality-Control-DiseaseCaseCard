@@ -1,0 +1,818 @@
+// ============================================================
+// 报卡质控宏 v5 — 日常报表审核 / 报卡质控 / 重卡审核
+// 功能：checkload（精简）/ qualitycontrol（完整）/ repeatcontrol
+// 优化：提取共享校验、修复 g 标志 regex、列别名引用
+// qualitycontrol 新增订正卡支持，保留原始卡 d2b 专属逻辑
+// WPS JSA 语法约束：顶层只允许 function 声明
+// ============================================================
+
+// ==================== 全局初始化（惰性加载）====================
+function init() {
+    var g = init._g;
+    if (g) return g;
+    g = {};
+    init._g = g;
+
+    g.COL = {
+        A:'A',B:'B',C:'C',D:'D',E:'E',F:'F',G:'G',H:'H',I:'I',J:'J',
+        K:'K',L:'L',M:'M',N:'N',O:'O',P:'P',Q:'Q',R:'R',S:'S',T:'T',
+        U:'U',V:'V',W:'W',X:'X',Y:'Y',Z:'Z',AA:'AA',AB:'AB',AC:'AC',
+        AD:'AD',AE:'AE',AF:'AF',AG:'AG',AH:'AH',AI:'AI',AJ:'AJ',AK:'AK',
+        AL:'AL',AM:'AM',AN:'AN',AO:'AO',AP:'AP',AQ:'AQ',AR:'AR',AS:'AS',
+        AT:'AT',AU:'AU'
+    };
+    // 常用列别名
+    var C = g.COL;
+    g.C = {
+        NAME: C.D, GUARDIAN: C.E, CERT: C.F,
+        AGE: C.I, UNIT: C.J, REGION: C.L,
+        ADDRESS: C.N, OCCP: C.O, CHCTYPE: C.P,
+        YIGAN_CRT: C.Q, DIAG_TIME: C.S, DEATH: C.T,
+        DISEASE: C.U, DISEASE_V: C.V, W_TIME: C.W,
+        X_TIME: C.X, AG_TIME: C.AG, AK_TIME: C.AK,
+        AL_TIME: C.AL, LOAD_TIME: C.AD, NOTE: C.AT
+    };
+
+    var m = {};
+    m.cell = function(sheet, col, row) {
+        try { var c = sheet.Range(col + row); c.Font.Color = 255; c.Interior.Color = 65536; } catch (e) {}
+    };
+    m.comment = function(sheet, col, row, text) {
+        try {
+            var c = sheet.Range(col + row);
+            if (c.Comment) { var old = c.Comment.Text(); c.ClearComments(); c.AddComment(old + '\n' + text); }
+            else { c.AddComment(text); }
+        } catch (e) {}
+    };
+    m.flag = function(sheet, col, row, msg) { m.cell(sheet, col, row); m.comment(sheet, col, row, msg); };
+    g.MARK = m;
+
+    var b = {};
+    b._sheetName = null;
+    b.create = function(sheet) {
+        var ts = String(new Date().getTime());
+        var name = '_bak_' + ts.substring(0, 24);
+        try {
+            sheet.Copy(null, Sheets.Item(Sheets.Count));
+            var ns = Sheets.Item(Sheets.Count); ns.Name = name; b._sheetName = name; return true;
+        } catch (e) { alert('[备份失败] ' + e.message); return false; }
+    };
+    b.getBackupName = function() { return b._sheetName; };
+    g.BACKUP = b;
+
+    var e = {};
+    e.save = function() { e._s = Application.ScreenUpdating; e._c = Application.Calculation; e._e = Application.EnableEvents; };
+    e.optimize = function() { e.save(); Application.ScreenUpdating = false; Application.Calculation = xlCalculationManual; Application.EnableEvents = false; };
+    e.restore = function() { Application.ScreenUpdating = e._s; Application.Calculation = e._c; Application.EnableEvents = e._e; };
+    e.safeRun = function(fn) {
+        e.optimize();
+        try { fn(); } catch (ex) { alert('出错：' + ex.message); } finally { e.restore(); }
+    };
+    g.EXCEL = e;
+
+    return g;
+}
+
+// ==================== 通用工具 ====================
+function getSheet() { return Sheets.Item(1); }
+function getLastRow(sheet) { return sheet.Range('A' + sheet.Rows.Count).End(xlUp).Row; }
+function isDigit(char) { return /^[0-9]$/.test(char); }
+
+// 判断单元格值是否为空（含 WPS 的 "." 占位）
+function isEmpty(val) { return val == null || val === '' || String(val) === '.'; }
+
+// 安全获取单元格数值（null 安全的 unwrap）
+function cellVal(sheet, col, row) {
+    var v = sheet.Range(col + row).Value2;
+    return isEmpty(v) ? null : v;
+}
+
+// ==================== 共享校验函数 ====================
+
+// ---- 身份证校验 ----
+function checkCertId(sheet, row, _refCOL) {
+    var C = _refCOL || init().C;
+    var region = cellVal(sheet, C.REGION, row);
+    var cert = sheet.Range(C.CERT + row).Value2;
+    if (region !== '本县区' && region !== '本市其它县区' && region !== '其他省') return null;
+    if (cert == null || cert === '') return null;
+
+    var certStr = String(cert);
+    // 补星号：非18位且不以 ' 或 * 开头
+    if (certStr.length !== 20 && certStr.charAt(0) !== "'" && certStr.charAt(0) !== '*') {
+        certStr = '*' + certStr;
+        sheet.Range(C.CERT + row).Value2 = certStr;
+    }
+    // 校验长度和格式
+    if (certStr.length !== 20) return '身份证不正确';
+    var lastChar = certStr.charAt(18);
+    if (lastChar === 'X' || lastChar === 'x') {
+        if (isNaN(certStr.substring(1, 18))) return '身份证不正确';
+    } else if (isDigit(lastChar)) {
+        if (isNaN(certStr.substring(1, 19))) return '身份证不正确';
+    } else {
+        return '身份证不正确';
+    }
+    return null;
+}
+
+// ---- 是否为甲类传染病（含按甲类管理）----
+function isDisasterClass(diseaseStr) {
+    return /鼠疫|霍乱|传染性非典|肺炭疽/.test(diseaseStr);
+}
+
+// ---- 是否跳过迟报迟审（肺结核/HIV/艾滋病）----
+function shouldSkipDelayCheck(sheet, row, _refCOL) {
+    var C = _refCOL || init().C;
+    var disU = cellVal(sheet, C.DISEASE, row);
+    var disV = cellVal(sheet, C.DISEASE_V, row);
+    if (disU == null) return false;
+    var su = String(disU), sv = disV ? String(disV) : '';
+    return su.indexOf('肺结核') !== -1 || su.indexOf('HIV') !== -1 || su.indexOf('艾滋病') !== -1 ||
+           sv.indexOf('肺结核') !== -1 || sv.indexOf('HIV') !== -1 || sv.indexOf('艾滋病') !== -1;
+}
+
+// ---- 标记单元格并返回问题描述 ----
+function markIssue(sheet, col, row, msg) {
+    var M = init().MARK;
+    M.flag(sheet, col, row, msg);
+}
+
+// ---- 获取当前时间（Excel 序列号格式）----
+function getNowTime() {
+    try {
+        var tmpSheet = getSheet();
+        var tmpCell = tmpSheet.Range('XFD1');
+        tmpCell.Formula = '=NOW()';
+        var t = tmpCell.Value2;
+        tmpCell.Clear();
+        return t;
+    } catch (e) {
+        var d = new Date(), e2 = new Date(1899, 11, 30);
+        return (d.getTime() - e2.getTime()) / 86400000;
+    }
+}
+
+// ==================== 迟报迟审检查 ====================
+
+// 检查原始卡迟报：AD(录入) - S(诊断)，返回问题列表
+function checkLateReport(sheet, row, C) {
+    var issues = [];
+    var seq = 0;
+    var disU = cellVal(sheet, C.DISEASE, row);
+    if (disU == null) return issues;
+    var disStr = String(disU);
+    var disaster = isDisasterClass(disStr);
+    var loadTime = cellVal(sheet, C.LOAD_TIME, row);
+    var diagTime = cellVal(sheet, C.DIAG_TIME, row);
+
+    if (loadTime != null && diagTime != null) {
+        var d1 = loadTime - diagTime;
+        if (d1 > 2/24 && disaster) {
+            markIssue(sheet, C.DIAG_TIME, row, '甲类报告超2小时');
+            seq++; issues.push('【' + seq + '】迟报·甲类报告超2小时');
+        } else if (d1 > 1 && !disaster) {
+            markIssue(sheet, C.DIAG_TIME, row, '乙类报告超24小时');
+            seq++; issues.push('【' + seq + '】迟报·乙类报告超24小时');
+        }
+    }
+    return issues;
+}
+
+// 检查原始卡迟审（checkload 使用）：AG(县区审核) / nowTime - AD(录入)
+function checkLateAuditSimple(sheet, row, C, nowTime, agOrig) {
+    var issues = [];
+    var seq = 0;
+    var disU = cellVal(sheet, C.DISEASE, row);
+    if (disU == null) return issues;
+    var disStr = String(disU);
+    var disaster = isDisasterClass(disStr);
+    var loadTime = cellVal(sheet, C.LOAD_TIME, row);
+    var agTime = agOrig && agOrig[row];
+
+    if (loadTime != null) {
+        var auditTime = (agTime != null && !isEmpty(agTime)) ? agTime : nowTime;
+        var d2 = auditTime - loadTime;
+        if (d2 > 2/24 && disaster) {
+            markIssue(sheet, C.LOAD_TIME, row, '甲类审核超2小时');
+            seq++; issues.push('【' + seq + '】迟审·甲类审核超2小时');
+        }
+        if (d2 > 1 && !disaster) {
+            markIssue(sheet, C.LOAD_TIME, row, '乙类审核超24小时');
+            seq++; issues.push('【' + seq + '】迟审·乙类审核超24小时');
+        }
+    }
+    return issues;
+}
+
+// 检查原始卡迟审（qualitycontrol 使用）：有 AG 值才检查，且含 d2b 逻辑
+function checkLateAuditQuality(sheet, row, C) {
+    var issues = [];
+    var seq = 0;
+    var disU = cellVal(sheet, C.DISEASE, row);
+    if (disU == null) return issues;
+    var disStr = String(disU);
+    var disaster = isDisasterClass(disStr);
+    var loadTime = cellVal(sheet, C.LOAD_TIME, row);
+    var agVal = cellVal(sheet, C.AG_TIME, row);    // 直接从 sheet 读取
+    var modTime = cellVal(sheet, C.AK_TIME, row);  // AK = 订正报告时间
+
+    if (agVal != null && loadTime != null) {
+        var d2 = Number(agVal) - Number(loadTime);
+        var d2b = modTime != null ? Number(agVal) - Number(modTime) : 999;
+        var isDot = modTime == null;  // AK 为空 / . 的处理
+
+        if (d2 > 2/24 && disaster && (d2b > 2/24 || isDot)) {
+            markIssue(sheet, C.LOAD_TIME, row, '甲类审核超2小时');
+            seq++; issues.push('【' + seq + '】迟审·甲类审核超2小时');
+        }
+        if (d2 > 1 && !disaster && (d2b > 1 || isDot)) {
+            markIssue(sheet, C.LOAD_TIME, row, '乙类审核超24小时');
+            seq++; issues.push('【' + seq + '】迟审·乙类审核超24小时');
+        }
+    }
+    return issues;
+}
+
+// 检查原始卡的迟报+迟审（checkload 使用）
+function checkOriginalDelay(sheet, row, C, nowTime, agOrig) {
+    var issues = checkLateReport(sheet, row, C);
+    var auditIssues = checkLateAuditSimple(sheet, row, C, nowTime, agOrig);
+    return issues.concat(auditIssues);
+}
+
+// 检查订正卡的迟报和迟审
+function checkFixedDelay(sheet, row, C, agOrig) {
+    var issues = [];
+    var seq = 0;
+    var disU = cellVal(sheet, C.DISEASE, row);
+    if (disU == null) return issues;
+    var disStr = String(disU);
+    var disaster = isDisasterClass(disStr);
+    var loadTime = cellVal(sheet, C.LOAD_TIME, row);
+    var diagTime = cellVal(sheet, C.DIAG_TIME, row);
+    var wTime = cellVal(sheet, C.W_TIME, row);
+    var xTime = cellVal(sheet, C.X_TIME, row);
+    var akTime = cellVal(sheet, C.AK_TIME, row);
+    var alTime = cellVal(sheet, C.AL_TIME, row);
+    var agTime = agOrig && agOrig[row];
+
+    // 订正卡条件：X(订正前终审) 有数据 且 X != AL(订正终审)
+    var xRaw = xTime != null ? String(xTime) : '';
+    var alRaw = alTime != null ? String(alTime) : '';
+    if (xRaw === '' || xRaw === alRaw) return issues;
+
+    // 订正前迟报：AD - W
+    if (loadTime != null && wTime != null) {
+        var d1 = loadTime - wTime;
+        if (d1 > 2/24 && disaster) {
+            markIssue(sheet, C.LOAD_TIME, row, '订正前迟报·甲类超2小时');
+            seq++; issues.push('【' + seq + '】订正前迟报·甲类超2小时');
+        } else if (d1 > 1 && !disaster) {
+            markIssue(sheet, C.LOAD_TIME, row, '订正前迟报·乙类超24小时');
+            seq++; issues.push('【' + seq + '】订正前迟报·乙类超24小时');
+        }
+    }
+    // 订正前迟审：X - AD
+    if (xTime != null && loadTime != null) {
+        var d2 = xTime - loadTime;
+        if (d2 > 2/24 && disaster) {
+            markIssue(sheet, C.X_TIME, row, '订正前迟审·甲类超2小时');
+            seq++; issues.push('【' + seq + '】订正前迟审·甲类超2小时');
+        } else if (d2 > 1 && !disaster) {
+            markIssue(sheet, C.X_TIME, row, '订正前迟审·乙类超24小时');
+            seq++; issues.push('【' + seq + '】订正前迟审·乙类超24小时');
+        }
+    }
+    // 订正后迟报：AK - S
+    if (akTime != null && diagTime != null) {
+        var d3 = akTime - diagTime;
+        if (d3 > 2/24 && disaster) {
+            markIssue(sheet, C.AK_TIME, row, '订正后迟报·甲类超2小时');
+            seq++; issues.push('【' + seq + '】订正后迟报·甲类超2小时');
+        } else if (d3 > 1 && !disaster) {
+            markIssue(sheet, C.AK_TIME, row, '订正后迟报·乙类超24小时');
+            seq++; issues.push('【' + seq + '】订正后迟报·乙类超24小时');
+        }
+    }
+    // 订正后迟审：AG - AK
+    if (agTime != null && akTime != null) {
+        var d4 = agTime - akTime;
+        if (d4 > 2/24 && disaster) {
+            markIssue(sheet, C.AG_TIME, row, '订正后迟审·甲类超2小时');
+            seq++; issues.push('【' + seq + '】订正后迟审·甲类超2小时');
+        } else if (d4 > 1 && !disaster) {
+            markIssue(sheet, C.AG_TIME, row, '订正后迟审·乙类超24小时');
+            seq++; issues.push('【' + seq + '】订正后迟审·乙类超24小时');
+        }
+    }
+    return issues;
+}
+
+// 执行迟报迟审的统一入口（checkload 使用）
+function checkDelayReport(sheet, row, C, nowTime, agOrig) {
+    var akTime = cellVal(sheet, C.AK_TIME, row);
+    var isFixed = akTime != null;  // AK(订正报告时间)有数据则视为订正卡
+    if (isFixed) {
+        return checkFixedDelay(sheet, row, C, agOrig);
+    } else {
+        return checkOriginalDelay(sheet, row, C, nowTime, agOrig);
+    }
+}
+
+// ==================== 疾病逻辑校验 ====================
+function checkDiseaseLogic(sheet, row, C) {
+    var issues = [];
+    var seq = 0;
+    var disU = cellVal(sheet, C.DISEASE, row);
+    if (disU == null) return issues;
+    var disStr = String(disU);
+    var chcType = cellVal(sheet, C.CHCTYPE, row);
+    var chcNote = String(sheet.Range(C.NOTE + row).Value2 || '');
+    var yiganCrt = cellVal(sheet, C.YIGAN_CRT, row);
+
+    // 确诊病例必须有病原学结果
+    if (chcType === '确诊病例' && chcNote.indexOf('阳性') === -1 && chcNote.indexOf('+') === -1) {
+        markIssue(sheet, C.NOTE, row, '确诊病例要求有病原学结果');
+        seq++; issues.push('【' + seq + '】确诊病例要求有病原学结果');
+    }
+    // 乙肝必须是确诊病例+慢性
+    if (disStr === '乙肝' && (chcType !== '确诊病例' || yiganCrt !== '慢性')) {
+        markIssue(sheet, C.DISEASE, row, '乙肝必须是确诊病例，慢性');
+        seq++; issues.push('【' + seq + '】乙肝必须是确诊病例，慢性');
+    }
+    // 丙肝分型
+    if (disStr === '丙肝') {
+        if (chcType === '确诊病例' && yiganCrt !== '慢性' && yiganCrt !== '急性') {
+            markIssue(sheet, C.DISEASE, row, '丙肝确诊病例必须是慢性或者急性');
+            seq++; issues.push('【' + seq + '】丙肝确诊病例必须是慢性或者急性');
+        } else if (chcType === '临床诊断病例' && yiganCrt !== '未分型') {
+            markIssue(sheet, C.DISEASE, row, '丙肝临床诊断病例必须是未分型');
+            seq++; issues.push('【' + seq + '】丙肝临床诊断病例必须是未分型');
+        }
+    }
+    // 新冠/登革热必须确诊病例
+    if ((disStr === '新型冠状病毒感染' || disStr === '登革热') && chcType !== '确诊病例') {
+        markIssue(sheet, C.DISEASE, row, disStr + '必须要求病例分类为"确诊病例"');
+        seq++; issues.push('【' + seq + '】' + disStr + '须分类为"确诊病例"');
+    }
+    // 疟疾分型
+    if (/疟/.test(disStr) && (chcType !== '确诊病例' || yiganCrt !== '未分型')) {
+        markIssue(sheet, C.DISEASE, row, '疟疾分为间日疟、恶性疟和未分型三类');
+        seq++; issues.push('【' + seq + '】疟疾分型错误');
+    }
+    // 本地/输入
+    if ((disStr === '间日疟' || disStr === '恶性疟' || disStr === '登革热') &&
+        chcNote.indexOf('本地') === -1 && chcNote.indexOf('输入') === -1) {
+        markIssue(sheet, C.DISEASE, row, '需要注明本地感染还是输入（外市输入、境外输入）');
+        seq++; issues.push('【' + seq + '】需要注明本地感染还是输入');
+    }
+    // 炭疽分型
+    if (disStr === '炭疽' && yiganCrt !== '肺炭疽' && yiganCrt !== '皮肤炭疽' && yiganCrt !== '未分型') {
+        markIssue(sheet, C.DISEASE, row, '炭疽分为肺炭疽、皮肤炭疽和未分型三类');
+        seq++; issues.push('【' + seq + '】炭疽分型错误');
+    }
+    return issues;
+}
+
+// ==================== 年龄/职业校验 ====================
+function checkAgeOccupation(sheet, row, C) {
+    var issues = [];
+    var seq = 0;
+
+    var age = String(sheet.Range(C.AGE + row).Value2 || '');
+    var guardian = String(sheet.Range(C.GUARDIAN + row).Text || '');
+    var name = String(sheet.Range(C.NAME + row).Text || '');
+    var occp = cellVal(sheet, C.OCCP, row);
+    var compy = String(sheet.Range(C.UNIT + row).Text || '').replace(/\（/g, '(').replace(/\）/g, ')');
+
+    var ageNum = (age.indexOf('岁') !== -1) ? Number(age.replace('岁', '')) : 0;
+    var isChild = (age.indexOf('月') !== -1 || age.indexOf('天') !== -1);
+
+    // 14岁以下必须有监护人
+    if (isChild || ageNum <= 14) {
+        if (guardian === '') {
+            markIssue(sheet, C.GUARDIAN, row, '14岁以下患者需要填写监护人信息');
+            markIssue(sheet, C.AGE, row, '');
+            seq++; issues.push('【' + seq + '】人群年龄与其职业有问题');
+        }
+        if (guardian !== '' && guardian === name) {
+            markIssue(sheet, C.GUARDIAN, row, '14岁以下患者与监护人名字一致');
+            markIssue(sheet, C.AGE, row, '');
+            seq++; issues.push('【' + seq + '】人群年龄与其职业有问题');
+        }
+    }
+
+    // 学生/幼托儿童需要数字班级
+    var reClass = /(\d+|[一二三四五六七八九十大中小]+)(班)?(年级)?(年)?(\d+|[一二三四五六七八九十]+|\(\d+\)|\([一二三四五六七八九十]+\))(班)?/;
+    if (occp === '学生' || occp === '幼托儿童') {
+        if (compy === '' || !reClass.test(compy)) {
+            markIssue(sheet, C.UNIT, row, '要求填写单位为数字班级');
+            seq++; issues.push('【' + seq + '】学生要求填写单位为数字班级');
+        }
+    }
+
+    // 特定职业必须填写单位
+    var occpNeedUnit = ['民工', '教师', '医务人员', '工人', '干部职员'];
+    if (occpNeedUnit.indexOf(occp) !== -1 && !compy) {
+        markIssue(sheet, C.UNIT, row, occp + '须填写发病时所在的工作单位名称');
+        seq++; issues.push('【' + seq + '】' + occp + '必须填写发病时所在的工作单位名称');
+    }
+
+    // 年龄与职业匹配
+    if (age.indexOf('岁') !== -1) {
+        if (ageNum > 3 && ageNum < 5 && (occp === '散居儿童' || occp === '学生')) {
+            markIssue(sheet, C.OCCP, row, '3-5岁不对应幼托儿童为可疑');
+            markIssue(sheet, C.AGE, row, '');
+            seq++; issues.push('【' + seq + '】3-5岁不对应幼托儿童为可疑');
+        } else if (ageNum > 7 && ageNum < 16 && (occp === '散居儿童' || occp === '幼托儿童')) {
+            markIssue(sheet, C.OCCP, row, '7-18岁不对应学生为可疑');
+            markIssue(sheet, C.AGE, row, '');
+            seq++; issues.push('【' + seq + '】7-18岁不对应学生为可疑');
+        } else if (ageNum < 16 && occp !== '学生' && occp !== '幼托儿童' && occp !== '散居儿童') {
+            markIssue(sheet, C.OCCP, row, '16岁以下从业人员不符合实际');
+            markIssue(sheet, C.AGE, row, '');
+            seq++; issues.push('【' + seq + '】16岁以下从业人员不符合实际');
+        }
+    } else if (isChild || (age.indexOf('岁') !== -1 && ageNum <= 3)) {
+        if (occp !== '幼托儿童' && occp !== '散居儿童') {
+            markIssue(sheet, C.OCCP, row, '3岁以下应为幼托儿童或散居儿童');
+            markIssue(sheet, C.AGE, row, '');
+            seq++; issues.push('【' + seq + '】3岁以下应为幼托儿童或散居儿童');
+        }
+    }
+
+    // 工作单位为幼儿园但人群不对应
+    if (/幼儿园/.test(compy) && occp !== '幼托儿童' && (isChild || ageNum < 16)) {
+        markIssue(sheet, C.OCCP, row, '工作单位为幼儿园但人群分类未对应幼托儿童');
+        seq++; issues.push('【' + seq + '】工作单位为幼儿园但人群分类未对应幼托儿童');
+    }
+
+    return issues;
+}
+
+// ==================== 重卡辅助函数 ====================
+function processTimeCompare(sheet, rowsArray) {
+    if (rowsArray.length < 2) return;
+    var mt = sheet.Range('S' + rowsArray[0]).Value2, kr = rowsArray[0];
+    for (var i = 1; i < rowsArray.length; i++) {
+        var mx = sheet.Range('S' + rowsArray[i]).Value2, dr = rowsArray[i];
+        if (mt > mx) { var t = mt; mt = mx; mx = t; var tr = kr; kr = rowsArray[i]; dr = tr; }
+        if (mx - mt <= 15) { keeprow(sheet, kr); deleterow(sheet, dr); }
+    }
+}
+function unique(vr, sheet, col) { var r = []; for (var i = 0; i < vr.length; i++) { var v = sheet.Range(col + vr[i]).Value2; if (r.indexOf(v) === -1) r.push(v); } return r; }
+function findrow(m, t) { var r = []; m.forEach(function(v, k) { if (v === t) r.push(k); }); return r; }
+function findmorethan2(m) { var r = []; m.forEach(function(v, k) { if (v >= 2) r.push(k); }); return r; }
+function deleterow(s, rn) { var row = s.Rows.Item(rn); row.Interior.Pattern = xlPatternSolid; row.Interior.Color = 255; }
+function keeprow(s, rn) { var row = s.Rows.Item(rn); row.Interior.Pattern = xlPatternSolid; row.Interior.Color = 65535; row.Interior.PatternColorIndex = -4105; }
+
+// ==================== 读取 AG 列原始值 ====================
+function readAgOrig(sheet, lastRow) {
+    var agOrig = [];
+    var agVals = sheet.Range('AG2:AG' + lastRow).Value2;
+    if (agVals == null) return agOrig;
+    var isArray2D = typeof agVals === 'object' && agVals.length > 0 &&
+                    typeof agVals[0] === 'object' && agVals[0] !== null && agVals[0].length !== undefined;
+    for (var i = 2; i <= lastRow; i++) {
+        agOrig[i] = isArray2D ? agVals[i - 2][0] : agVals[i - 2];
+    }
+    return agOrig;
+}
+
+// ==================== 格式化日期列 ====================
+function formatDateColumns(sheet, lastRow) {
+    sheet.Range('H:H,R:R,Z:Z,T:T,AA:AA,U:U').NumberFormatLocal = 'yyyy/m/d;@';
+    sheet.Range('S:S,AD:AD,W:X,AK:AL,AE:AE,AG2:AG' + lastRow + ',AH2:AH' + lastRow).NumberFormatLocal = 'yyyy/m/d h:mm;@';
+}
+
+// checkload 专用日期格式化（不含 AA/U/AE/AH）
+function formatDateColumnsSimple(sheet, lastRow) {
+    sheet.Range('H:H,R:R,Z:Z,T:T').NumberFormatLocal = 'yyyy/m/d;@';
+    sheet.Range('S:S,AD:AD,W:X,AK:AL,AG2:AG' + lastRow).NumberFormatLocal = 'yyyy/m/d h:mm;@';
+}
+
+// ============================================================
+// checkload — 精简版：身份证 / 迟报 / 迟审（含订正卡）
+// ============================================================
+function checkload() {
+    var g = init();
+    var EXCEL = g.EXCEL;
+    var C = g.C;
+    var nowTime = getNowTime();
+
+    EXCEL.safeRun(function() {
+        var sheet = getSheet();
+        var lastRow = getLastRow(sheet);
+
+        // 清理
+        sheet.Range('A1:AT' + lastRow).ClearFormats();
+        sheet.Range('A1:AT' + lastRow).ClearComments();
+
+        // 保存原始 AG 值，空值用 nowTime 填充
+        var agOrig = readAgOrig(sheet, lastRow);
+        for (var i = 2; i <= lastRow; i++) {
+            if (isEmpty(agOrig[i])) {
+                sheet.Range(C.AG_TIME + i).Value2 = nowTime;
+            }
+        }
+
+        var certNum = 0, delayReportNum = 0, delayAuditNum = 0;
+
+        for (var i = 2; i <= lastRow; i++) {
+            var seq = 0;
+            var issues = [];
+
+            // 身份证校验
+            var certErr = checkCertId(sheet, i, C);
+            if (certErr) {
+                markIssue(sheet, C.CERT, i, certErr);
+                certNum++; seq++;
+                issues.push('【' + seq + '】' + certErr);
+            }
+
+            // 跳过肺结核/HIV/艾滋病的迟报迟审
+            var skipDisease = shouldSkipDelayCheck(sheet, i, C);
+
+            if (!skipDisease) {
+                // 迟报/迟审
+                var delayIssues = checkDelayReport(sheet, i, C, nowTime, agOrig);
+                for (var di = 0; di < delayIssues.length; di++) {
+                    seq++;
+                    if (delayIssues[di].indexOf('迟报') !== -1) delayReportNum++;
+                    if (delayIssues[di].indexOf('迟审') !== -1) delayAuditNum++;
+                    issues.push('【' + seq + '】' + delayIssues[di].substring(delayIssues[di].indexOf('】') + 1));
+                }
+            } else {
+                // 肺结核/HIV/艾滋病：整行红底
+                sheet.Range('A' + i + ':AT' + i).Interior.Color = 255;
+            }
+
+            // A 列汇总批注
+            var aCell = sheet.Range('A' + i);
+            if (aCell.Comment) aCell.Comment.Delete();
+            if (issues.length > 0) {
+                aCell.AddComment(issues.join('\n'));
+            }
+        }
+
+        // 日期格式化
+        formatDateColumnsSimple(sheet, lastRow);
+
+        alert('分析完毕！\n' +
+              '身份证有问题：【' + certNum + '】个。\n' +
+              '迟报卡（含订正）：【' + delayReportNum + '】个。\n' +
+              '迟审卡（含订正）：【' + delayAuditNum + '】个。');
+    });
+}
+
+// ============================================================
+// qualitycontrol — 完整报卡质控（含订正卡）
+// ============================================================
+function qualitycontrol() {
+    var g = init();
+    var EXCEL = g.EXCEL;
+    var C = g.C;
+
+    EXCEL.safeRun(function() {
+        var sheet = getSheet();
+        var lastRow = getLastRow(sheet);
+
+        // 清理
+        sheet.Range('A1:AT' + lastRow).ClearFormats();
+        sheet.Range('A1:AT' + lastRow).ClearComments();
+
+        // 读取 AG 原始值（订正卡检查需要）
+        var agOrig = readAgOrig(sheet, lastRow);
+
+        // 统计
+        var stats = {
+            certNum: 0, delayReportNum: 0, delayAuditNum: 0,
+            guardianNum: 0, classNum: 0, unitNum: 0,
+            ageOccpNum: 0, kindergatenNum: 0,
+            diseaseNum: 0, noteNum: 0, addressNum: 0
+        };
+
+        // 表头
+        sheet.Range('A1').Value2 = '问题汇总';
+        sheet.Range('A1').Font.Bold = true;
+
+        for (var i = 2; i <= lastRow; i++) {
+            var seq = 0;
+            var allIssues = [];
+
+            // 1) 身份证
+            var certErr = checkCertId(sheet, i, C);
+            if (certErr) {
+                markIssue(sheet, C.CERT, i, certErr);
+                stats.certNum++; seq++;
+                allIssues.push(seq + '. 身份证不正确');
+            }
+
+            // 2) 地址（光明区须含街道）
+            var address = String(sheet.Range(C.ADDRESS + i).Value2 || '');
+            if (address.indexOf('光明区') !== -1 && address.indexOf('街道') === -1) {
+                markIssue(sheet, C.ADDRESS, i, '光明区现住址必须包含街道信息');
+                stats.addressNum++; seq++;
+                allIssues.push(seq + '. 现住址必须包含街道信息');
+            }
+
+            // 3) 年龄/职业
+            var ageOccpIssues = checkAgeOccupation(sheet, i, C);
+            for (var ai = 0; ai < ageOccpIssues.length; ai++) {
+                seq++;
+                var txt = ageOccpIssues[ai];
+                // 分类统计（关键词匹配原始 issue 文本）
+                if (txt.indexOf('人群年龄') !== -1) stats.guardianNum++;
+                else if (txt.indexOf('数字班级') !== -1) stats.classNum++;
+                else if (txt.indexOf('工作单位名称') !== -1) stats.unitNum++;
+                else if (txt.indexOf('幼儿园') !== -1) stats.kindergatenNum++;
+                else stats.ageOccpNum++;
+                allIssues.push(seq + '. ' + txt.substring(txt.indexOf('】') + 1));
+            }
+
+            // 4) 迟报迟审（含订正卡）
+            var akTimeVal = cellVal(sheet, C.AK_TIME, i);
+            var isFixedCard = akTimeVal != null;  // AK 有数据则为订正卡
+
+            if (isFixedCard) {
+                // 订正卡：完整的四段检查（同 checkload）
+                var fixedIssues = checkFixedDelay(sheet, i, C, agOrig);
+                for (var fi = 0; fi < fixedIssues.length; fi++) {
+                    seq++;
+                    if (fixedIssues[fi].indexOf('迟报') !== -1) stats.delayReportNum++;
+                    if (fixedIssues[fi].indexOf('迟审') !== -1) stats.delayAuditNum++;
+                    // 保留 "订正前/订正后" 前缀，去掉 "迟报·"/"迟审·"
+                    var clean = fixedIssues[fi].substring(fixedIssues[fi].indexOf('】') + 1);
+                    clean = clean.replace(/^(订正前|订正后)?(迟报|迟审)·/, function(m, p1) { return p1 || ''; });
+                    allIssues.push(seq + '. ' + clean);
+                }
+            } else {
+                // 原始卡：checkLateReport + checkLateAuditQuality（含 d2b 逻辑）
+                var reportIssues = checkLateReport(sheet, i, C);
+                var auditIssues = checkLateAuditQuality(sheet, i, C);
+                var delayIssues = reportIssues.concat(auditIssues);
+                for (var di = 0; di < delayIssues.length; di++) {
+                    seq++;
+                    if (delayIssues[di].indexOf('迟报') !== -1) stats.delayReportNum++;
+                    if (delayIssues[di].indexOf('迟审') !== -1) stats.delayAuditNum++;
+                    // 去掉 "迟报·"/"迟审·" 前缀（原版 qualitycontrol 不含）
+                    var clean = delayIssues[di].substring(delayIssues[di].indexOf('】') + 1);
+                    clean = clean.replace(/^(迟报|迟审)·/, '');
+                    allIssues.push(seq + '. ' + clean);
+                }
+            }
+
+            // 5) 疾病逻辑
+            var diseaseIssues = checkDiseaseLogic(sheet, i, C);
+            for (var ei = 0; ei < diseaseIssues.length; ei++) {
+                seq++;
+                var dtxt = diseaseIssues[ei];
+                if (dtxt.indexOf('病原学') !== -1 || dtxt.indexOf('注明') !== -1) stats.noteNum++;
+                else stats.diseaseNum++;
+                allIssues.push(seq + '. ' + dtxt.substring(dtxt.indexOf('】') + 1));
+            }
+
+            // 6) 死亡标记
+            var deathDate = cellVal(sheet, C.DEATH, i);
+            if (deathDate != null) {
+                markIssue(sheet, C.DEATH, i, '死亡人群要进一步确认');
+                stats.diseaseNum++; seq++;
+                allIssues.push(seq + '. 死亡人群要进一步确认');
+            }
+
+            // A 列汇总
+            var aCell = sheet.Range('A' + i);
+            if (aCell.Comment) aCell.Comment.Delete();
+            if (allIssues.length > 0) {
+                var summary = allIssues.join('\n');
+                aCell.Value2 = summary;
+                aCell.AddComment(summary);
+            } else {
+                aCell.Value2 = '无问题';
+            }
+        }
+
+        // 日期格式化
+        formatDateColumns(sheet, lastRow);
+
+        alert('检测完毕！问题已汇总在A列。\n\n' +
+              '身份证有问题：【' + stats.certNum + '】个。\n' +
+              '迟报卡：【' + stats.delayReportNum + '】个。\n' +
+              '迟审卡：【' + stats.delayAuditNum + '】个。\n' +
+              '患儿家长有问题：【' + stats.guardianNum + '】个。\n' +
+              '填写数字班级有问题：【' + stats.classNum + '】个。\n' +
+              '须工作单位职业有问题：【' + stats.unitNum + '】个。\n' +
+              '年龄不对应：【' + stats.ageOccpNum + '】个。\n' +
+              '单位与年龄不对应：【' + stats.kindergatenNum + '】个。\n' +
+              '病例类型有问题：【' + stats.diseaseNum + '】个。\n' +
+              '备注有问题：【' + stats.noteNum + '】个。\n' +
+              '现住址有问题：【' + stats.addressNum + '】个。');
+    });
+}
+
+// ============================================================
+// repeatcontrol — 重卡审核
+// ============================================================
+function repeatcontrol() {
+    var g = init();
+    var BACKUP = g.BACKUP, EXCEL = g.EXCEL;
+
+    EXCEL.safeRun(function() {
+        var sheet = Application.ActiveSheet;
+        if (!BACKUP.create(sheet)) return;
+        var lastRow = sheet.Cells(sheet.Rows.Count, 1).End(xlUp).Row;
+        sheet.Range('A:AT').ClearFormats();
+
+        // 按身份证号分组统计
+        var certCount = new Map();
+        var rowToCert = new Map();
+        for (var ri = 1; ri <= lastRow; ri++) {
+            var v = sheet.Cells(ri, 6).Value2;
+            if (v) { certCount.set(v, (certCount.get(v) || 0) + 1); rowToCert.set(ri, v); }
+        }
+
+        // 找出重复的身份证号
+        var dupCerts = findmorethan2(certCount);
+        if (dupCerts.length === 0) { alert('未发现重复身份证号码'); return; }
+
+        // 所有涉及重复的行
+        var dupRows = new Map();
+        var dupCertList = [];
+        rowToCert.forEach(function(v, k) {
+            if (dupCerts.indexOf(v) !== -1) {
+                dupRows.set(k, v);
+                if (dupCertList.indexOf(v) === -1) dupCertList.push(v);
+            }
+        });
+
+        // 对每个重复身份证号做病种去重
+        for (var ig = 0; ig < dupCertList.length; ig++) {
+            var sameCertRows = findrow(dupRows, dupCertList[ig]);
+            var diseases = unique(sameCertRows, sheet, 'U');
+
+            // 同一身份证+同一病种才算真重卡
+            if (diseases.length < sameCertRows.length) {
+                var diseaseCount = new Map();
+                var rowToDisease = new Map();
+                for (var di = 0; di < sameCertRows.length; di++) {
+                    var dv = sheet.Range('U' + sameCertRows[di]).Value2;
+                    diseaseCount.set(dv, (diseaseCount.get(dv) || 0) + 1);
+                    rowToDisease.set(sameCertRows[di], dv);
+                }
+
+                var dupDiseases = findmorethan2(diseaseCount);
+                for (var fi = 0; fi < dupDiseases.length; fi++) {
+                    var sameDiseaseRows = findrow(rowToDisease, dupDiseases[fi]);
+                    var caseTypes = unique(sameDiseaseRows, sheet, 'P');
+
+                    if (caseTypes.length > 1) {
+                        // 病例类型不同：保留确诊病例，删除临床诊断
+                        var typeCount = new Map();
+                        for (var qj = 0; qj < sameDiseaseRows.length; qj++) {
+                            var qv = sheet.Range('P' + sameDiseaseRows[qj]).Value2;
+                            typeCount.set(qv, (typeCount.get(qv) || 0) + 1);
+                        }
+                        typeCount.forEach(function(cnt, type) {
+                            if (type === '临床诊断病例') {
+                                for (var qj = 0; qj < sameDiseaseRows.length; qj++) {
+                                    var qv = sheet.Range('P' + sameDiseaseRows[qj]).Value2;
+                                    if (qv === '临床诊断病例') deleterow(sheet, sameDiseaseRows[qj]);
+                                }
+                            }
+                        });
+                        if (typeCount.get('确诊病例') > 1) {
+                            processTimeCompare(sheet, findrow(rowToDisease, dupDiseases[fi]));
+                        }
+                    } else {
+                        processTimeCompare(sheet, sameDiseaseRows);
+                    }
+                }
+            }
+        }
+
+        formatDateColumns(sheet, lastRow);
+        alert('重卡检测完毕！');
+    });
+}
+
+function other1() { alert('暂未开发，敬请期待！'); }
+
+// ============================================================
+// 功能区初始化
+// ============================================================
+function Workbook_Open() {
+    var buttons = [
+        { name: '日常报表审核', action: 'checkload' },
+        { name: '重卡审核', action: 'repeatcontrol' },
+        { name: '报卡质控', action: 'qualitycontrol' },
+        { name: '预留项目', action: 'other1' }
+    ];
+    for (var i = 0; i < buttons.length; i++) {
+        var bar = Application.CommandBars.Add();
+        bar.Visible = true;
+        var btn = bar.Controls.Add(msoControlButton);
+        btn.Caption = buttons[i].name;
+        btn.OnAction = buttons[i].action;
+    }
+}
