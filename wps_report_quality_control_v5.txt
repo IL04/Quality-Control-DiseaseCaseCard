@@ -768,21 +768,21 @@ function repeatcontrol() {
 
                     if (caseTypes.length > 1) {
                         // 病例类型不同：保留确诊病例，删除临床诊断
-                        var typeCount = new Map();
+                        var rowToType = new Map();
                         for (var qj = 0; qj < sameDiseaseRows.length; qj++) {
                             var qv = sheet.Range('P' + sameDiseaseRows[qj]).Value2;
-                            typeCount.set(qv, (typeCount.get(qv) || 0) + 1);
+                            rowToType.set(sameDiseaseRows[qj], qv);
                         }
-                        typeCount.forEach(function(cnt, type) {
-                            if (type === '临床诊断病例') {
-                                for (var qj = 0; qj < sameDiseaseRows.length; qj++) {
-                                    var qv = sheet.Range('P' + sameDiseaseRows[qj]).Value2;
-                                    if (qv === '临床诊断病例') deleterow(sheet, sameDiseaseRows[qj]);
-                                }
-                            }
+                        // 删除临床诊断
+                        rowToType.forEach(function(type, row) {
+                            if (type === '临床诊断病例') deleterow(sheet, row);
                         });
-                        if (typeCount.get('确诊病例') > 1) {
-                            processTimeCompare(sheet, findrow(rowToDisease, dupDiseases[fi]));
+                        // 确诊记录处理
+                        var confirmedRows = findrow(rowToType, '确诊病例');
+                        if (confirmedRows.length > 1) {
+                            processTimeCompare(sheet, confirmedRows);
+                        } else if (confirmedRows.length === 1) {
+                            keeprow(sheet, confirmedRows[0]);
                         }
                     } else {
                         processTimeCompare(sheet, sameDiseaseRows);
