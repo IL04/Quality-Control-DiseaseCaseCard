@@ -1,9 +1,9 @@
 // ============================================================
-// 报卡质控宏 v5.0.2 — 日常报表审核 / 报卡质控 / 重卡审核
+// 报卡质控宏 v5.0.3 — 日常报表审核 / 报卡质控 / 重卡审核
 // 功能：checkload（精简）/ qualitycontrol（完整）/ repeatcontrol
 // 优化：提取共享校验、修复 g 标志 regex、列别名引用
 // qualitycontrol 新增订正卡支持，保留原始卡 d2b 专属逻辑
-// v5.0.2: 18位身份证不能属于港澳台或外籍
+// v5.0.3: 死亡提醒（T列/AM列有数据即提示"有死亡卡，要注意"）
 // WPS JSA 语法约束：顶层只允许 function 声明
 // ============================================================
 
@@ -29,6 +29,7 @@ function init() {
         AGE: C.I, UNIT: C.J, REGION: C.L,
         ADDRESS: C.N, OCCP: C.O, CHCTYPE: C.P,
         YIGAN_CRT: C.Q, DIAG_TIME: C.S, DEATH: C.T,
+        DEATH_AUDIT: C.AM,
         DISEASE: C.U, DISEASE_V: C.V, W_TIME: C.W,
         X_TIME: C.X, AG_TIME: C.AG, AK_TIME: C.AK,
         AL_TIME: C.AL, LOAD_TIME: C.AD, NOTE: C.AT
@@ -581,6 +582,16 @@ function checkload() {
                 sheet.Range('A' + i + ':AT' + i).Interior.Color = 255;
             }
 
+            // 死亡提醒（T列死亡日期或AM列终审死亡时间）
+            var deathDate = cellVal(sheet, C.DEATH, i);
+            var deathAudit = cellVal(sheet, C.DEATH_AUDIT, i);
+            if (deathDate != null || deathAudit != null) {
+                sheet.Range(C.DEATH + i).Font.Color = 255;
+                sheet.Range(C.DEATH + i).Interior.Color = 65536;
+                sheet.Range(C.DEATH + i).AddComment('有死亡卡，要注意');
+                seq++;
+                issues.push('【' + seq + '】有死亡卡，要注意');
+            }
             // A 列汇总批注
             var aCell = sheet.Range('A' + i);
             if (aCell.Comment) aCell.Comment.Delete();
@@ -708,10 +719,11 @@ function qualitycontrol() {
 
             // 6) 死亡标记
             var deathDate = cellVal(sheet, C.DEATH, i);
-            if (deathDate != null) {
-                markIssue(sheet, C.DEATH, i, '死亡人群要进一步确认');
+            var deathAudit = cellVal(sheet, C.DEATH_AUDIT, i);
+            if (deathDate != null || deathAudit != null) {
+                markIssue(sheet, C.DEATH, i, '有死亡卡，要注意');
                 stats.diseaseNum++; seq++;
-                allIssues.push(seq + '. 死亡人群要进一步确认');
+                allIssues.push(seq + '. 有死亡卡，要注意');
             }
 
             // A 列汇总
