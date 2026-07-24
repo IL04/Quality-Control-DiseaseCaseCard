@@ -707,7 +707,7 @@ function qualitycontrol() {
                 seq++;
                 var dtxt = diseaseIssues[ei];
                 if (dtxt.indexOf('病原学') !== -1 || dtxt.indexOf('注明') !== -1) stats.noteNum++;
-                else stats.deathNum++;
+                else stats.diseaseNum++;
                 allIssues.push(seq + '. ' + dtxt.substring(dtxt.indexOf('】') + 1));
             }
 
