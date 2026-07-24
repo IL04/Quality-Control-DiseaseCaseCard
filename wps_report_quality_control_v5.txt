@@ -3,8 +3,8 @@
 // 功能：checkload（精简）/ qualitycontrol（完整）/ repeatcontrol
 // 优化：提取共享校验、修复 g 标志 regex、列别名引用
 // qualitycontrol 新增订正卡支持，保留原始卡 d2b 专属逻辑
+// v5.0.2: 18位身份证不能属于港澳台或外籍
 // v5.0.3: 死亡提醒（T列/AM列有数据即提示"有死亡卡，要注意"）
-// WPS JSA 语法约束：顶层只允许 function 声明
 // ============================================================
 
 // ==================== 全局初始化（惰性加载）====================
@@ -115,6 +115,18 @@ function checkCertId(sheet, row, _refCOL) {
         certStr = '*' + certStr;
         sheet.Range(C.CERT + row).Value2 = certStr;
     }
+    // 校验长度和格式
+    if (certStr.length !== 20) return '身份证不正确';
+    var lastChar = certStr.charAt(18);
+    if (lastChar === 'X' || lastChar === 'x') {
+        if (isNaN(certStr.substring(1, 18))) return '身份证不正确';
+    } else if (isDigit(lastChar)) {
+        if (isNaN(certStr.substring(1, 19))) return '身份证不正确';
+    } else {
+        return '身份证不正确';
+    }
+    return null;
+}
     // 校验长度和格式
     if (certStr.length !== 20) return '身份证不正确';
     var lastChar = certStr.charAt(18);
@@ -809,8 +821,6 @@ function repeatcontrol() {
                         }
                     } else {
                         processTimeCompare(sheet, sameDiseaseRows);
-                    }
-                }
             }
         }
 
