@@ -567,12 +567,22 @@ function checkload() {
             var deathDate = cellVal(sheet, C.DEATH, i);
             var deathAudit = cellVal(sheet, C.DEATH_AUDIT, i);
             if (deathDate != null || deathAudit != null) {
+                // 标记T列
                 sheet.Range(C.DEATH + i).Font.Color = 255;
                 sheet.Range(C.DEATH + i).Interior.Color = 65536;
-                sheet.Range(C.DEATH + i).AddComment('有死亡卡，要注意');
+                // 如果AM也有数据，标记AM列
+                if (deathAudit != null) {
+                    sheet.Range(C.DEATH_AUDIT + i).Font.Color = 255;
+                    sheet.Range(C.DEATH_AUDIT + i).Interior.Color = 65536;
+                }
+                // 拼装死亡信息（含日期）
+                var deathMsg = '有死亡卡';
+                if (deathDate != null) deathMsg += '，死亡日期：' + sheet.Range(C.DEATH + i).Text;
+                if (deathAudit != null) deathMsg += '，终审死亡时间：' + sheet.Range(C.DEATH_AUDIT + i).Text;
+                sheet.Range(C.DEATH + i).AddComment(deathMsg);
                 seq++;
                 deathNum++;
-                issues.push('【' + seq + '】有死亡卡，要注意');
+                issues.push('【' + seq + '】' + deathMsg);
             }
             // A 列汇总批注
             var aCell = sheet.Range('A' + i);
@@ -706,8 +716,18 @@ function qualitycontrol() {
             var deathAudit = cellVal(sheet, C.DEATH_AUDIT, i);
             if (deathDate != null || deathAudit != null) {
                 markIssue(sheet, C.DEATH, i, '有死亡卡，要注意');
-                stats.diseaseNum++; seq++;
-                allIssues.push(seq + '. 有死亡卡，要注意');
+                // 如果AM也有数据，标记AM列
+                if (deathAudit != null) {
+                    sheet.Range(C.DEATH_AUDIT + i).Font.Color = 255;
+                    sheet.Range(C.DEATH_AUDIT + i).Interior.Color = 65536;
+                    sheet.Range(C.DEATH_AUDIT + i).AddComment('有死亡卡，要注意');
+                }
+                // 拼装死亡信息（含日期）
+                var deathMsg = '有死亡卡';
+                if (deathDate != null) deathMsg += '，死亡日期：' + sheet.Range(C.DEATH + i).Text;
+                if (deathAudit != null) deathMsg += '，终审死亡时间：' + sheet.Range(C.DEATH_AUDIT + i).Text;
+                stats.deathNum++; seq++;
+                allIssues.push(seq + '. ' + deathMsg);
             }
 
             // A 列汇总
