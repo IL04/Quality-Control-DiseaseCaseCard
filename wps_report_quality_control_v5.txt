@@ -99,29 +99,36 @@ function checkCertId(sheet, row, _refCOL) {
     if (cert == null || cert === '') return null;
 
     var certStr = String(cert);
-    // 去掉前缀后的有效证件号
-    var rawCert = (certStr.charAt(0) === "'" || certStr.charAt(0) === '*') ? certStr.substring(1) : certStr;
+    // 去掉前缀后的有效证件号（兼容 WPS 各种前导符）
+    var rawCert = certStr;
+    if (rawCert.length === 19 && !/^\d/.test(rawCert)) {
+        rawCert = rawCert.substring(1);
+    }
 
     // 规则：18位大陆身份证不能属于港澳台或外籍
-    if (rawCert.length === 18 && (region === '港澳台' || region === '外籍')) {
+    var regionStr = region != null ? String(region).replace(/^\s+|\s+$/g, '') : '';
+    if (rawCert.length === 18 && (regionStr === '港澳台' || regionStr === '外籍')) {
         return '18位身份证不能属于港澳台或外籍';
     }
 
     // 原有规则：只对内地区域做身份证格式校验
     if (region !== '本县区' && region !== '本市其它县区' && region !== '其他省') return null;
 
-    // 补星号：非18位且不以 ' 或 * 开头
-    if (certStr.length !== 20 && certStr.charAt(0) !== "'" && certStr.charAt(0) !== '*') {
+    // 补星号：未标记的身份证加 * 前缀
+    var hasPrefix = !/^\d/.test(certStr);
+    if (!hasPrefix) {
         certStr = '*' + certStr;
         sheet.Range(C.CERT + row).Value2 = certStr;
+        hasPrefix = true;
     }
-    // 校验长度和格式
-    if (certStr.length !== 20) return '身份证不正确';
-    var lastChar = certStr.charAt(18);
+    // 校验长度和格式（去掉前缀后应为18位）
+    var body = hasPrefix ? certStr.substring(1) : certStr;
+    if (body.length !== 18) return '身份证不正确';
+    var lastChar = body.charAt(17);
     if (lastChar === 'X' || lastChar === 'x') {
-        if (isNaN(certStr.substring(1, 18))) return '身份证不正确';
+        if (isNaN(body.substring(0, 17))) return '身份证不正确';
     } else if (isDigit(lastChar)) {
-        if (isNaN(certStr.substring(1, 19))) return '身份证不正确';
+        if (isNaN(body.substring(0, 18))) return '身份证不正确';
     } else {
         return '身份证不正确';
     }
