@@ -536,7 +536,7 @@ function checkload() {
             }
         }
 
-        var certNum = 0, delayReportNum = 0, delayAuditNum = 0;
+        var certNum = 0, delayReportNum = 0, delayAuditNum = 0, deathNum = 0;
 
         for (var i = 2; i <= lastRow; i++) {
             var seq = 0;
@@ -575,6 +575,7 @@ function checkload() {
                 sheet.Range(C.DEATH + i).Interior.Color = 65536;
                 sheet.Range(C.DEATH + i).AddComment('有死亡卡，要注意');
                 seq++;
+                deathNum++;
                 issues.push('【' + seq + '】有死亡卡，要注意');
             }
             // A 列汇总批注
@@ -591,7 +592,8 @@ function checkload() {
         alert('分析完毕！\n' +
               '身份证有问题：【' + certNum + '】个。\n' +
               '迟报卡（含订正）：【' + delayReportNum + '】个。\n' +
-              '迟审卡（含订正）：【' + delayAuditNum + '】个。');
+              '迟审卡（含订正）：【' + delayAuditNum + '】个。\n' +
+              '死亡卡：【' + deathNum + '】个。');
     });
 }
 
@@ -619,7 +621,8 @@ function qualitycontrol() {
             certNum: 0, delayReportNum: 0, delayAuditNum: 0,
             guardianNum: 0, classNum: 0, unitNum: 0,
             ageOccpNum: 0, kindergatenNum: 0,
-            diseaseNum: 0, noteNum: 0, addressNum: 0
+            diseaseNum: 0, noteNum: 0, addressNum: 0,
+            deathNum: 0
         };
 
         // 表头
@@ -698,7 +701,7 @@ function qualitycontrol() {
                 seq++;
                 var dtxt = diseaseIssues[ei];
                 if (dtxt.indexOf('病原学') !== -1 || dtxt.indexOf('注明') !== -1) stats.noteNum++;
-                else stats.diseaseNum++;
+                else stats.deathNum++;
                 allIssues.push(seq + '. ' + dtxt.substring(dtxt.indexOf('】') + 1));
             }
 
@@ -737,6 +740,7 @@ function qualitycontrol() {
               '单位与年龄不对应：【' + stats.kindergatenNum + '】个。\n' +
               '病例类型有问题：【' + stats.diseaseNum + '】个。\n' +
               '备注有问题：【' + stats.noteNum + '】个。\n' +
+              '死亡卡：【' + stats.deathNum + '】个。\n' +
               '现住址有问题：【' + stats.addressNum + '】个。');
     });
 }
