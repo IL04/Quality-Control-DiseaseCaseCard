@@ -811,6 +811,8 @@ function repeatcontrol() {
                         processTimeCompare(sheet, sameDiseaseRows);
             }
         }
+            }
+        }
 
         formatDateColumns(sheet, lastRow);
         alert('重卡检测完毕！');
