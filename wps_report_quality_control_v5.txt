@@ -127,18 +127,6 @@ function checkCertId(sheet, row, _refCOL) {
     }
     return null;
 }
-    // 校验长度和格式
-    if (certStr.length !== 20) return '身份证不正确';
-    var lastChar = certStr.charAt(18);
-    if (lastChar === 'X' || lastChar === 'x') {
-        if (isNaN(certStr.substring(1, 18))) return '身份证不正确';
-    } else if (isDigit(lastChar)) {
-        if (isNaN(certStr.substring(1, 19))) return '身份证不正确';
-    } else {
-        return '身份证不正确';
-    }
-    return null;
-}
 
 // ---- 是否为甲类传染病（含按甲类管理）----
 function isDisasterClass(diseaseStr) {
