@@ -128,28 +128,6 @@ function checkCertId(sheet, row, _refCOL) {
     return null;
 }
 
-    // 原有规则：只对内地区域做身份证格式校验
-    if (region !== '本县区' && region !== '本市其它县区' && region !== '其他省') return null;
-
-    var certStr = String(cert);
-    // 补星号：非18位且不以 ' 或 * 开头
-    if (certStr.length !== 20 && certStr.charAt(0) !== "'" && certStr.charAt(0) !== '*') {
-        certStr = '*' + certStr;
-        sheet.Range(C.CERT + row).Value2 = certStr;
-    }
-    // 校验长度和格式
-    if (certStr.length !== 20) return '身份证不正确';
-    var lastChar = certStr.charAt(18);
-    if (lastChar === 'X' || lastChar === 'x') {
-        if (isNaN(certStr.substring(1, 18))) return '身份证不正确';
-    } else if (isDigit(lastChar)) {
-        if (isNaN(certStr.substring(1, 19))) return '身份证不正确';
-    } else {
-        return '身份证不正确';
-    }
-    return null;
-}
-
 // ---- 是否为甲类传染病（含按甲类管理）----
 function isDisasterClass(diseaseStr) {
     return /鼠疫|霍乱|传染性非典|肺炭疽/.test(diseaseStr);
