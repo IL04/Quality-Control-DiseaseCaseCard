@@ -89,6 +89,30 @@ function cellVal(sheet, col, row) {
     return isEmpty(v) ? null : v;
 }
 
+// Excel 序列号 → 日期字符串 yyyy/mm/dd
+function fmtDate(serial) {
+    if (serial == null) return '';
+    var base = new Date(1899, 11, 30);
+    var d = new Date(base.getTime() + serial * 86400000);
+    var y = d.getFullYear();
+    var m = ('0' + (d.getMonth() + 1)).slice(-2);
+    var day = ('0' + d.getDate()).slice(-2);
+    return y + '/' + m + '/' + day;
+}
+
+// Excel 序列号 → 日期时间字符串 yyyy/mm/dd hh:mm
+function fmtDateTime(serial) {
+    if (serial == null) return '';
+    var base = new Date(1899, 11, 30);
+    var d = new Date(base.getTime() + serial * 86400000);
+    var y = d.getFullYear();
+    var m = ('0' + (d.getMonth() + 1)).slice(-2);
+    var day = ('0' + d.getDate()).slice(-2);
+    var h = ('0' + d.getHours()).slice(-2);
+    var min = ('0' + d.getMinutes()).slice(-2);
+    return y + '/' + m + '/' + day + ' ' + h + ':' + min;
+}
+
 // ==================== 共享校验函数 ====================
 
 // ---- 身份证校验 ----
@@ -577,8 +601,8 @@ function checkload() {
                 }
                 // 拼装死亡信息（含日期）
                 var deathMsg = '有死亡卡';
-                if (deathDate != null) deathMsg += '，死亡日期：' + sheet.Range(C.DEATH + i).Text;
-                if (deathAudit != null) deathMsg += '，终审死亡时间：' + sheet.Range(C.DEATH_AUDIT + i).Text;
+                if (deathDate != null) deathMsg += '，死亡日期：' + fmtDate(deathDate);
+                if (deathAudit != null) deathMsg += '，终审死亡时间：' + fmtDateTime(deathAudit);
                 sheet.Range(C.DEATH + i).AddComment(deathMsg);
                 seq++;
                 deathNum++;
@@ -724,8 +748,8 @@ function qualitycontrol() {
                 }
                 // 拼装死亡信息（含日期）
                 var deathMsg = '有死亡卡';
-                if (deathDate != null) deathMsg += '，死亡日期：' + sheet.Range(C.DEATH + i).Text;
-                if (deathAudit != null) deathMsg += '，终审死亡时间：' + sheet.Range(C.DEATH_AUDIT + i).Text;
+                if (deathDate != null) deathMsg += '，死亡日期：' + fmtDate(deathDate);
+                if (deathAudit != null) deathMsg += '，终审死亡时间：' + fmtDateTime(deathAudit);
                 stats.deathNum++; seq++;
                 allIssues.push(seq + '. ' + deathMsg);
             }
